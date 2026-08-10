@@ -28,17 +28,17 @@ def test_vote_with_reasoning_and_get_results(direct_vm, direct_deploy, direct_al
     options = ["Python", "JavaScript", "Go"]
     contract = direct_deploy("voting.py", question, options)
 
-    # Alice votes for Python with reasoning
+    # Alice votes for Python with reasoning (using her address as sender)
     direct_vm.sender = direct_alice
-    contract.vote_with_reasoning(direct_alice, "opt_0", "I prefer Python for its simplicity and readability")  # Python is opt_0
+    contract.vote_with_reasoning("opt_0", "I prefer Python for its simplicity and readability")  # Python is opt_0
 
     # Bob votes for JavaScript with reasoning
     direct_vm.sender = direct_bob
-    contract.vote_with_reasoning(direct_bob, "opt_1", "JavaScript is essential for web development")  # JavaScript is opt_1
+    contract.vote_with_reasoning("opt_1", "JavaScript is essential for web development")  # JavaScript is opt_1
 
     # Charlie votes for Python with reasoning
     direct_vm.sender = direct_charlie
-    contract.vote_with_reasoning(direct_charlie, "opt_0", "Python has great libraries for data science")  # Python is opt_0
+    contract.vote_with_reasoning("opt_0", "Python has great libraries for data science")  # Python is opt_0
 
     # Check voting status
     assert contract.has_voted(direct_alice) == True
@@ -47,7 +47,7 @@ def test_vote_with_reasoning_and_get_results(direct_vm, direct_deploy, direct_al
 
     # Try to vote again - should fail
     with direct_vm.expect_revert("[EXPECTED] Already voted"):
-        contract.vote_with_reasoning(direct_alice, "opt_2")
+        contract.vote_with_reasoning("opt_2")
 
     # End voting (owner only)
     direct_vm.sender = direct_alice  # Assuming alice is owner
@@ -74,7 +74,7 @@ def test_vote_with_suspicious_reasoning_may_be_rejected(direct_vm, direct_deploy
     # Vote with reasoning that might be seen as coerced or suspicious
     # Note: In direct mode, this will use leader function only (no consensus)
     # In full consensus, validators might reject this based on LLM analysis
-    contract.vote_with_reasoning(direct_alice, "opt_0", "I was told to vote for Python")
+    contract.vote_with_reasoning("opt_0", "I was told to vote for Python")
 
     # Check that vote was recorded (in direct mode)
     assert contract.has_voted(direct_alice) == True
@@ -96,7 +96,7 @@ def test_vote_invalid_option(direct_vm, direct_deploy, direct_alice):
 
     # Try to vote for non-existent option
     with direct_vm.expect_revert("[EXPECTED] Invalid option"):
-        contract.vote_with_reasoning(direct_alice, "opt_999", "Some reasoning")
+        contract.vote_with_reasoning("opt_999", "Some reasoning")
 
 
 def test_end_voting_only_owner(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -130,7 +130,7 @@ def test_vote_after_end_fails(direct_vm, direct_deploy, direct_alice, direct_bob
     # Try to vote after end - should fail
     direct_vm.sender = direct_bob
     with direct_vm.expect_revert("[EXPECTED] Voting has ended"):
-        contract.vote_with_reasoning(direct_bob, "opt_0", "Some reasoning")
+        contract.vote_with_reasoning("opt_0", "Some reasoning")
 
 
 if __name__ == "__main__":

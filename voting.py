@@ -2,7 +2,6 @@
 
 from genlayer import *
 from dataclasses import dataclass
-import json
 import re
 
 # Error classifications
@@ -36,19 +35,19 @@ class VotingContract(gl.Contract):
     owner: Address
     question: str
     options: TreeMap[str, VoteOption]
-    voters: TreeMap[str, VoteRecord]  # voter_address -> their vote record
+    voters: TreeMap[Address, VoteRecord]  # voter_address -> their vote record
     voting_ended: bool
     end_block: u256
 
     def __init__(self, question: str, options: list[str], duration_blocks: u256 = 10080):
         self.owner = gl.message.sender_address
         self.question = question
-        self.voters = TreeMap()
+        self.voters = TreeMap[Address, VoteRecord]()
         self.voting_ended = False
         self.end_block = gl.get_block_number() + duration_blocks
 
         # Initialize options
-        self.options = TreeMap()
+        self.options = TreeMap[str, VoteOption]()
         for i, opt_text in enumerate(options):
             opt_id = f"opt_{i}"
             self.options[opt_id] = VoteOption(
@@ -58,7 +57,10 @@ class VotingContract(gl.Contract):
             )
 
     @gl.public.write
-    def vote_with_reasoning(self, voter_addr: Address, option_id: str, reasoning: str):
+    def vote_with_reasoning(self, option_id: str, reasoning: str):
+        # Use the actual message sender as voter
+        voter_addr = gl.message.sender_address
+
         # Check if voting has ended
         if self.voting_ended:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Voting has ended")
@@ -107,13 +109,13 @@ Vote details:
 Respond as JSON with:
 - score: 0-100 (0 = definitely illegitimate/coerced, 100 = completely legitimate)
 - legitimate: true/false (true if score >= 70)
-- notes: brief explanation of your assessment"""
+- info: brief explanation of your assessment"""
 
             try:
                 resp = gl.nondet.exec_prompt(prompt, response_format="json")
                 sc = resp.get("score", 50)
                 le = bool(resp.get("legitimate", False))
-                nt = str(resp.get("notes", ""))[:200]
+                nt = str(resp.get("info", ""))[:200]
 
                 try:
                     sc = max(0, min(100, int(round(float(sc)))))
@@ -126,7 +128,7 @@ Respond as JSON with:
 
         def validator_fn(leader_res: gl.vm.Result) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
-                return self._err_handler(leader_res, leader_fn)
+                return self._err_handler(leader_res, lead_fn)
 
             try:
                 v_res = leader_fn()
@@ -147,7 +149,7 @@ Respond as JSON with:
                     return False
 
                 # Note similarity check: require at least 30% word overlap
-                # Only perform if both have notes
+                # Only perform if both have info
                 if l_info and v_info:
                     l_words = set(re.findall(r'\b\w+\b', l_info.lower()))
                     v_words = set(re.findall(r'\b\w+\b', v_info.lower()))
@@ -156,7 +158,7 @@ Respond as JSON with:
                         total = len(l_words | v_words)
                         if total > 0 and (overlap / total) < 0.3:
                             return False
-                # If one has notes and the other doesn't, they don't match
+                # If one has info and the other doesn't, they don't match
                 elif l_info or v_info:
                     return False
 
@@ -169,7 +171,7 @@ Respond as JSON with:
     def _err_handler(self, lead_res, lead_fn) -> bool:
         lead_msg = getattr(lead_res, 'message', '')
         try:
-            leader_fn()
+            lead_fn()
             return False
         except gl.vm.UserError as e:
             val_msg = getattr(e, 'message', str(e))
