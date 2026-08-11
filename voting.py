@@ -3,6 +3,7 @@
 from genlayer import *
 from dataclasses import dataclass
 import re
+import time
 
 # Error classifications
 ERR_EXPECTED = "[EXPECTED]"
@@ -25,29 +26,38 @@ class VoteRecord:
     voter_addr: Address
     option_id: str
     reasoning: str
-    legitimacy_score: u256  # 0-100 scale from LLM check
+    legitimacy_score: u256  # 0-100
     is_legitimate: bool
     timestamp: str
 
 
 class VotingContract(gl.Contract):
-    # Contract storage
     owner: Address
     question: str
     options: TreeMap[str, VoteOption]
-    voters: TreeMap[Address, VoteRecord]  # voter_address -> their vote record
+    voters: TreeMap[str, VoteRecord]  # str(address) -> VoteRecord
     voting_ended: bool
-    end_block: u256
+    end_timestamp: u256  # Unix timestamp (seconds)
 
-    def __init__(self, question: str, options: list[str], duration_blocks: u256 = 10080):
+    def __init__(
+        self,
+        question: str,
+        options: list[str],
+        duration_seconds: u256 = 604800  # default = 7 days
+    ):
+        if not question or not question.strip():
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Question cannot be empty")
+        if not options:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} At least one option required")
+        if duration_seconds == 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Duration must be > 0")
+
         self.owner = gl.message.sender_address
-        self.question = question
-        self.voters = TreeMap[Address, VoteRecord]()
+        self.question = question.strip()
         self.voting_ended = False
-        self.end_block = gl.get_block_number() + duration_blocks
+        self.end_timestamp = u256(int(time.time()) + int(duration_seconds))
 
-        # Initialize options
-        self.options = TreeMap[str, VoteOption]()
+        # Storage TreeMaps are already zero-initialized — do NOT assign TreeMap()
         for i, opt_text in enumerate(options):
             opt_id = f"opt_{i}"
             self.options[opt_id] = VoteOption(
@@ -58,40 +68,33 @@ class VotingContract(gl.Contract):
 
     @gl.public.write
     def vote_with_reasoning(self, option_id: str, reasoning: str):
-        # Use the actual message sender as voter
-        voter_addr = gl.message.sender_address
-
-        # Check if voting has ended
         if self.voting_ended:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Voting has ended")
 
-        # Check if option exists
         if option_id not in self.options:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Invalid option")
 
-        # Check if voter already voted
-        if voter_addr in self.voters:
+        voter_addr = gl.message.sender_address
+        voter_key = str(voter_addr)
+
+        if voter_key in self.voters:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Already voted")
 
-        # Validate the vote reasoning using LLM consensus
         legitimacy_result = self._check_vote_legitimacy(voter_addr, option_id, reasoning)
 
-        # Record the vote
         vote_record = VoteRecord(
             voter_addr=voter_addr,
             option_id=option_id,
             reasoning=reasoning,
             legitimacy_score=legitimacy_result["score"],
             is_legitimate=legitimacy_result["legitimate"],
-            timestamp=str(gl.get_block_timestamp())
+            timestamp=str(int(time.time()))
         )
 
-        self.voters[voter_addr] = vote_record
+        self.voters[voter_key] = vote_record
 
-        # Only count the vote if it's deemed legitimate
         if legitimacy_result["legitimate"]:
-            opt = self.options[option_id]
-            opt.votes += 1
+            self.options[option_id].votes += 1
 
     def _check_vote_legitimacy(self, voter_addr: Address, option_id: str, reasoning: str) -> dict:
         def leader_fn():
@@ -109,13 +112,13 @@ Vote details:
 Respond as JSON with:
 - score: 0-100 (0 = definitely illegitimate/coerced, 100 = completely legitimate)
 - legitimate: true/false (true if score >= 70)
-- info: brief explanation of your assessment"""
+- notes: brief explanation of your assessment"""
 
             try:
                 resp = gl.nondet.exec_prompt(prompt, response_format="json")
                 sc = resp.get("score", 50)
                 le = bool(resp.get("legitimate", False))
-                nt = str(resp.get("info", ""))[:200]
+                nt = str(resp.get("notes", ""))[:200]
 
                 try:
                     sc = max(0, min(100, int(round(float(sc)))))
@@ -128,28 +131,22 @@ Respond as JSON with:
 
         def validator_fn(leader_res: gl.vm.Result) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
-                return self._err_handler(leader_res, lead_fn)
+                return self._err_handler(leader_res, leader_fn)
 
             try:
                 v_res = leader_fn()
-                # Leader result fields: score, legitimate, info
                 l_sc = leader_res.calldata["score"]
                 l_le = leader_res.calldata["legitimate"]
                 l_info = leader_res.calldata["info"]
-                # Validator result fields: score, legitimate, info
                 v_sc = v_res["score"]
                 v_le = v_res["legitimate"]
                 v_info = v_res["info"]
 
-                # Compare scores with tolerance (allow small variations)
                 if abs(l_sc - v_sc) > 15:
                     return False
-                # Legitimacy decision must match exactly
                 if l_le != v_le:
                     return False
 
-                # Note similarity check: require at least 30% word overlap
-                # Only perform if both have info
                 if l_info and v_info:
                     l_words = set(re.findall(r'\b\w+\b', l_info.lower()))
                     v_words = set(re.findall(r'\b\w+\b', v_info.lower()))
@@ -158,7 +155,6 @@ Respond as JSON with:
                         total = len(l_words | v_words)
                         if total > 0 and (overlap / total) < 0.3:
                             return False
-                # If one has info and the other doesn't, they don't match
                 elif l_info or v_info:
                     return False
 
@@ -175,13 +171,10 @@ Respond as JSON with:
             return False
         except gl.vm.UserError as e:
             val_msg = getattr(e, 'message', str(e))
-            # Deterministic errors: must match exactly
             if val_msg.startswith(ERR_EXPECTED) or val_msg.startswith(ERR_EXTERNAL):
                 return val_msg == lead_msg
-            # Transient: agree if both hit transient failure
             if val_msg.startswith(ERR_TRANSIENT) and lead_msg.startswith(ERR_TRANSIENT):
                 return True
-            # LLM or unknown: disagree — forces consensus retry
             return False
         except:
             return False
@@ -191,8 +184,8 @@ Respond as JSON with:
         if gl.message.sender_address != self.owner:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Only owner")
 
-        if gl.get_block_number() < self.end_block:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} Voting not ended yet")
+        if u256(int(time.time())) < self.end_timestamp:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Voting period not finished yet")
 
         self.voting_ended = True
 
@@ -202,17 +195,38 @@ Respond as JSON with:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Voting not ended")
 
         results = {}
-        total_legitimate_votes = u256(0)
-
+        total = u256(0)
         for opt_id, opt in self.options.items():
             results[opt_id] = {
                 "description": opt.description,
                 "votes": opt.votes
             }
-            total_legitimate_votes += opt.votes
-
-        results["_total"] = total_legitimate_votes
+            total += opt.votes
+        results["_total"] = total
         return results
+
+    @gl.public.view
+    def get_current_tallies(self) -> dict:
+        results = {}
+        total = u256(0)
+        for opt_id, opt in self.options.items():
+            results[opt_id] = {
+                "description": opt.description,
+                "votes": opt.votes
+            }
+            total += opt.votes
+        results["_total"] = total
+        return results
+
+    @gl.public.view
+    def get_options(self) -> dict:
+        return {
+            opt_id: {
+                "description": opt.description,
+                "votes": opt.votes
+            }
+            for opt_id, opt in self.options.items()
+        }
 
     @gl.public.view
     def get_question(self) -> str:
@@ -220,16 +234,17 @@ Respond as JSON with:
 
     @gl.public.view
     def has_voted(self, voter_addr: Address) -> bool:
-        return voter_addr in self.voters
+        return str(voter_addr) in self.voters
 
     @gl.public.view
     def get_vote_record(self, voter_addr: Address) -> dict:
-        if voter_addr not in self.voters:
+        voter_key = str(voter_addr)
+        if voter_key not in self.voters:
             raise gl.vm.UserError(f"{ERR_EXPECTED} No vote record found")
 
-        record = self.voters[voter_addr]
+        record = self.voters[voter_key]
         return {
-            "voter": record.voter_addr,
+            "voter": str(record.voter_addr),
             "option_id": record.option_id,
             "reasoning": record.reasoning,
             "legitimacy_score": record.legitimacy_score,
@@ -238,9 +253,26 @@ Respond as JSON with:
         }
 
     @gl.public.view
+    def get_all_vote_records(self) -> dict:
+        return {
+            key: {
+                "voter": str(rec.voter_addr),
+                "option_id": rec.option_id,
+                "reasoning": rec.reasoning,
+                "legitimacy_score": rec.legitimacy_score,
+                "is_legitimate": rec.is_legitimate,
+                "timestamp": rec.timestamp,
+            }
+            for key, rec in self.voters.items()
+        }
+
+    @gl.public.view
     def get_voting_status(self) -> dict:
+        now = u256(int(time.time()))
         return {
             "ended": self.voting_ended,
-            "current_block": gl.get_block_number(),
-            "end_block": self.end_block
+            "current_timestamp": now,
+            "end_timestamp": self.end_timestamp,
+            "time_remaining": max(0, int(self.end_timestamp) - int(now)),
+            "owner": str(self.owner)
         }
