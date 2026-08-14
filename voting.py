@@ -11,6 +11,24 @@ ERR_EXTERNAL = "[EXTERNAL]"
 ERR_TRANSIENT = "[TRANSIENT]"
 ERR_LLM = "[LLM_ERROR]"
 
+# A vote counts iff its normalized legitimacy score reaches this threshold.
+# This is the single source of truth: the boolean flag is always derived from
+# the score, never taken from the model's own `legitimate` field.
+LEGITIMACY_THRESHOLD = 70
+
+
+def _normalize_score(raw) -> int:
+    """Clamp an arbitrary model-supplied score into 0-100. Unparseable -> 50."""
+    try:
+        return max(0, min(100, int(round(float(raw)))))
+    except:
+        return 50
+
+
+def _is_legitimate(score: int) -> bool:
+    """The one and only definition of legitimacy."""
+    return int(score) >= LEGITIMACY_THRESHOLD
+
 
 @dataclass
 @allow_storage
@@ -82,18 +100,23 @@ class VotingContract(gl.Contract):
 
         legitimacy_result = self._check_vote_legitimacy(voter_addr, option_id, reasoning)
 
+        # Re-derive on the write path: what is stored and what is tallied both
+        # come from the score, so the record can never contradict the threshold.
+        score = _normalize_score(legitimacy_result["score"])
+        is_legit = _is_legitimate(score)
+
         vote_record = VoteRecord(
             voter_addr=voter_addr,
             option_id=option_id,
             reasoning=reasoning,
-            legitimacy_score=legitimacy_result["score"],
-            is_legitimate=legitimacy_result["legitimate"],
+            legitimacy_score=u256(score),
+            is_legitimate=is_legit,
             timestamp=str(int(time.time()))
         )
 
         self.voters[voter_key] = vote_record
 
-        if legitimacy_result["legitimate"]:
+        if is_legit:
             self.options[option_id].votes += 1
 
     def _check_vote_legitimacy(self, voter_addr: Address, option_id: str, reasoning: str) -> dict:
@@ -111,19 +134,18 @@ Vote details:
 
 Respond as JSON with:
 - score: 0-100 (0 = definitely illegitimate/coerced, 100 = completely legitimate)
-- legitimate: true/false (true if score >= 70)
-- notes: brief explanation of your assessment"""
+- notes: brief explanation of your assessment
+
+Only the score matters; the contract decides legitimacy from it (score >= {LEGITIMACY_THRESHOLD})."""
 
             try:
                 resp = gl.nondet.exec_prompt(prompt, response_format="json")
-                sc = resp.get("score", 50)
-                le = bool(resp.get("legitimate", False))
                 nt = str(resp.get("notes", ""))[:200]
 
-                try:
-                    sc = max(0, min(100, int(round(float(sc)))))
-                except:
-                    sc = 50
+                # The flag is DERIVED from the normalized score, never read from
+                # the model response, so score and flag can never disagree.
+                sc = _normalize_score(resp.get("score", 50))
+                le = _is_legitimate(sc)
 
                 return {"score": sc, "legitimate": le, "info": nt}
             except Exception as e:
@@ -135,12 +157,19 @@ Respond as JSON with:
 
             try:
                 v_res = leader_fn()
-                l_sc = leader_res.calldata["score"]
-                l_le = leader_res.calldata["legitimate"]
+                l_sc = _normalize_score(leader_res.calldata["score"])
+                l_le = bool(leader_res.calldata["legitimate"])
                 l_info = leader_res.calldata["info"]
                 v_sc = v_res["score"]
                 v_le = v_res["legitimate"]
                 v_info = v_res["info"]
+
+                # Reject a leader whose flag does not match its own score.
+                if l_le != _is_legitimate(l_sc):
+                    return False
+                # Same rule re-checked on our own result (defensive; derived above).
+                if v_le != _is_legitimate(v_sc):
+                    return False
 
                 if abs(l_sc - v_sc) > 15:
                     return False
