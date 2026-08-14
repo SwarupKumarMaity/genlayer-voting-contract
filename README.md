@@ -4,11 +4,11 @@ A GenLayer intelligent contract for conducting polls and votes with legitimacy v
 
 ## Deployment
 
-| | |
-|---|---|
-| Network | _fill in (e.g. Studionet / Testnet Asimov)_ |
-| Deployment transaction | `0x6bb04197d7125f8d8973885bfd07d8697e295aac90707baf14ad69f95a9be6e8` |
-| Contract address | _fill in (20-byte `0x…` address from the deployment receipt)_ |
+|                        |                                                                      |
+| ---------------------- | -------------------------------------------------------------------- |
+| Network                | Studionet                                                            |
+| Deployment transaction | `0xa7b133716a2ac2c87b3de156a7da31187f8b6217ccf345c41813e63d3788d38e` |
+| Contract address       | 0xe3884d8a7ccf50d36f27a26812c61333B3cE3698                           |
 
 ## Features
 
@@ -57,6 +57,7 @@ contradict the rule.
 ## Contract Details
 
 ### Storage
+
 - `owner`: Address of contract creator (the deploy-time sender)
 - `question`: The voting question
 - `options`: `TreeMap[str, VoteOption]` of vote options with descriptions and vote counts (only legitimate votes)
@@ -65,12 +66,15 @@ contradict the rule.
 - `end_timestamp`: Unix timestamp (seconds) at which the voting period elapses
 
 ### VoteOption Dataclass
+
 - `option_id`: Generated ID (`opt_0`, `opt_1`, …)
 - `description`: Option text supplied at deployment
 - `votes`: Count of legitimate votes for this option
 
 ### VoteRecord Dataclass
+
 Each vote record stores:
+
 - `voter_addr`: Address of the voter
 - `option_id`: Selected option ID
 - `reasoning`: User-provided reasoning for their vote
@@ -81,10 +85,12 @@ Each vote record stores:
 ### Functions
 
 #### Write Functions
+
 - `vote_with_reasoning(option_id: str, reasoning: str)`: Cast a vote with reasoning (uses `gl.message.sender_address`)
 - `end_voting()`: Owner-only; fails until `end_timestamp` has passed
 
 #### View Functions
+
 - `get_results()`: Get voting results (only after voting ends)
 - `get_current_tallies()`: Get live tallies at any time, before or after voting ends
 - `get_options()`: Get all options with their descriptions and vote counts
@@ -98,11 +104,13 @@ Each vote record stores:
 
 1. Deploy the contract with a question, options, and an optional duration in **seconds**
    (default 604800 = 7 days):
+
    ```python
    contract = VotingContract("Best programming language?", ["Python", "JavaScript", "Go"], 604800)
    ```
 
 2. Users vote by calling `vote_with_reasoning()` with option ID and reasoning:
+
    ```python
    # Users must provide reasoning for their vote
    contract.vote_with_reasoning("opt_0", "I prefer Python for its simplicity and readability")
@@ -141,6 +149,7 @@ Direct mode tests live in `tests/direct/`:
   during contract load; a no-op on other platforms
 
 Run the tests with:
+
 ```bash
 python -m pytest tests/direct -v
 ```
