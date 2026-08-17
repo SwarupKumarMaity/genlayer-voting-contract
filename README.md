@@ -21,8 +21,9 @@ A GenLayer intelligent contract for conducting polls and votes with legitimacy v
 - Results become readable automatically once the deadline passes (or the owner ends voting)
 - Timeout-based voting period (wall-clock seconds), enforced at vote time: `vote_with_reasoning`
   rejects any vote cast after `end_timestamp`, even before the owner calls `end_voting`
-- Live tallies are hidden while voting is open: `get_results`/`get_current_tallies` revert until
-  voting has ended, so early vote counts cannot influence voters
+- Live tallies are hidden while voting is open: `get_results`/`get_current_tallies` revert and
+  `get_options` omits vote counts until voting has ended, so early counts cannot influence voters
+- Reasoning and option text are validated: empty reasoning or empty option text is rejected
 - Full audit trail of vote reasoning and legitimacy assessments
 
 ## Consensus Mechanism
@@ -90,14 +91,15 @@ Each vote record stores:
 
 #### Write Functions
 
-- `vote_with_reasoning(option_id: str, reasoning: str)`: Cast a vote with reasoning (uses `gl.message.sender_address`); fails once the configured deadline (`end_timestamp`) has passed, even if `end_voting()` was never called
+- `vote_with_reasoning(option_id: str, reasoning: str)`: Cast a vote with reasoning (uses `gl.message.sender_address`); rejects empty reasoning, and fails once the configured deadline (`end_timestamp`) has passed, even if `end_voting()` was never called
 - `end_voting()`: Owner-only; fails until `end_timestamp` has passed
 
 #### View Functions
 
 - `get_results()`: Get voting results (only after voting has ended — deadline passed or `end_voting` called)
 - `get_current_tallies()`: Get final tallies (only after voting has ended; hidden while voting is open)
-- `get_options()`: Get all options with their descriptions and vote counts
+- `get_options()`: Get all options with their descriptions (always available, so voters can map
+  option IDs); vote counts are included only once voting has ended
 - `get_question()`: Get the voting question
 - `has_voted(voter_addr: Address)`: Check if an address has voted
 - `get_vote_record(voter_addr: Address)`: Get complete vote record including legitimacy assessment
@@ -158,6 +160,10 @@ Direct mode tests live in `tests/direct/`:
 - `test_legitimacy_invariant.py` — pins the score/flag invariant using mocked LLM replies,
   including adversarial pairs such as `{"score": 85, "legitimate": false}`, threshold
   boundaries, clamping, and validator rejection of inconsistent leader results
+- `test_end_to_end.py` — full lifecycle (deploy → mixed legitimate/coerced votes → deadline →
+  results), owner-vs-non-owner `end_voting`, hidden-until-ended counts on every read path,
+  empty reasoning/option validation, the ±15 score-tolerance and 30% notes-overlap consensus
+  boundaries, and vote-record timestamp sanity
 - `conftest.py` — Windows-only shim for a gltest bug that unlinks a still-open temp file
   during contract load; a no-op on other platforms
 

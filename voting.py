@@ -77,6 +77,8 @@ class VotingContract(gl.Contract):
 
         # Storage TreeMaps are already zero-initialized — do NOT assign TreeMap()
         for i, opt_text in enumerate(options):
+            if not opt_text or not opt_text.strip():
+                raise gl.vm.UserError(f"{ERR_EXPECTED} Option text cannot be empty")
             opt_id = f"opt_{i}"
             self.options[opt_id] = VoteOption(
                 option_id=opt_id,
@@ -105,6 +107,9 @@ class VotingContract(gl.Contract):
 
         if option_id not in self.options:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Invalid option")
+
+        if not reasoning or not reasoning.strip():
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Reasoning cannot be empty")
 
         voter_addr = gl.message.sender_address
         voter_key = str(voter_addr)
@@ -268,11 +273,15 @@ Only the score matters; the contract decides legitimacy from it (score >= {LEGIT
 
     @gl.public.view
     def get_options(self) -> dict:
-        return {
-            opt_id: {
-                "description": opt.description,
-                "votes": opt.votes
+        # Descriptions are always visible so voters can map option IDs, but
+        # live vote counts stay hidden until voting has ended.
+        if self._voting_is_over():
+            return {
+                opt_id: {"description": opt.description, "votes": opt.votes}
+                for opt_id, opt in self.options.items()
             }
+        return {
+            opt_id: {"description": opt.description}
             for opt_id, opt in self.options.items()
         }
 
