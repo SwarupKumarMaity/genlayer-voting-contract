@@ -17,9 +17,12 @@ A GenLayer intelligent contract for conducting polls and votes with legitimacy v
 - Prevents double voting
 - Uses LLM consensus to assess vote legitimacy (detects coercion, manipulation, etc.)
 - Only counts votes deemed legitimate by consensus (≥70/100 legitimacy score)
-- Owner can end voting period once it has elapsed
-- View results after voting ends
-- Timeout-based voting period (wall-clock seconds)
+- Owner can end voting period once it has elapsed (or it ends automatically at the deadline)
+- Results become readable automatically once the deadline passes (or the owner ends voting)
+- Timeout-based voting period (wall-clock seconds), enforced at vote time: `vote_with_reasoning`
+  rejects any vote cast after `end_timestamp`, even before the owner calls `end_voting`
+- Live tallies are hidden while voting is open: `get_results`/`get_current_tallies` revert until
+  voting has ended, so early vote counts cannot influence voters
 - Full audit trail of vote reasoning and legitimacy assessments
 
 ## Consensus Mechanism
@@ -62,7 +65,8 @@ contradict the rule.
 - `question`: The voting question
 - `options`: `TreeMap[str, VoteOption]` of vote options with descriptions and vote counts (only legitimate votes)
 - `voters`: `TreeMap[str, VoteRecord]` keyed by `str(voter_address)` → their complete vote record
-- `voting_ended`: Boolean flag indicating if voting has concluded
+- `voting_ended`: Boolean flag the owner sets by calling `end_voting()`; voting is also
+  considered ended (for status, results, and vote gating) once `end_timestamp` passes
 - `end_timestamp`: Unix timestamp (seconds) at which the voting period elapses
 
 ### VoteOption Dataclass
@@ -86,19 +90,20 @@ Each vote record stores:
 
 #### Write Functions
 
-- `vote_with_reasoning(option_id: str, reasoning: str)`: Cast a vote with reasoning (uses `gl.message.sender_address`)
+- `vote_with_reasoning(option_id: str, reasoning: str)`: Cast a vote with reasoning (uses `gl.message.sender_address`); fails once the configured deadline (`end_timestamp`) has passed, even if `end_voting()` was never called
 - `end_voting()`: Owner-only; fails until `end_timestamp` has passed
 
 #### View Functions
 
-- `get_results()`: Get voting results (only after voting ends)
-- `get_current_tallies()`: Get live tallies at any time, before or after voting ends
+- `get_results()`: Get voting results (only after voting has ended — deadline passed or `end_voting` called)
+- `get_current_tallies()`: Get final tallies (only after voting has ended; hidden while voting is open)
 - `get_options()`: Get all options with their descriptions and vote counts
 - `get_question()`: Get the voting question
 - `has_voted(voter_addr: Address)`: Check if an address has voted
 - `get_vote_record(voter_addr: Address)`: Get complete vote record including legitimacy assessment
 - `get_all_vote_records()`: Get every vote record (full audit trail)
-- `get_voting_status()`: Get `ended`, `current_timestamp`, `end_timestamp`, `time_remaining`, and `owner`
+- `get_voting_status()`: Get `ended` (True once the deadline passes or `end_voting` is called),
+  `current_timestamp`, `end_timestamp`, `time_remaining`, and `owner`
 
 ## Usage
 
@@ -118,8 +123,10 @@ Each vote record stores:
 
 3. Owner ends voting with `end_voting()` once `end_timestamp` has passed
 
-4. Results can be viewed with `get_results()` after voting ends (only counts legitimate votes).
-   Use `get_current_tallies()` to inspect counts while voting is still open.
+4. Results can be viewed with `get_results()` once voting has ended (only counts legitimate
+   votes). Use `get_current_tallies()` to inspect final counts. Voting ends when the owner
+   calls `end_voting()` *or* automatically when `end_timestamp` passes, so results appear
+   even if the owner never ends the poll manually.
 
 5. Individual vote records can be inspected with `get_vote_record()`, or all of them with
    `get_all_vote_records()`, to see reasoning and legitimacy scores
@@ -135,13 +142,19 @@ Each vote record stores:
 - **Notes Similarity**: 30% word overlap ensures validators are assessing similar aspects
 - **Error Classification**: Errors are tagged `[EXPECTED]`, `[EXTERNAL]`, `[TRANSIENT]`, or
   `[LLM_ERROR]` so validators can distinguish deterministic disagreement from transient failure
+- **Deadline Is Authoritative**: `vote_with_reasoning` rejects votes once `end_timestamp` passes,
+  and every read path (`get_results`, `get_current_tallies`, `get_voting_status`) treats the poll
+  as ended at the deadline even if the owner never calls `end_voting()`. Result views stay hidden
+  until voting has actually ended.
 
 ## Testing
 
 Direct mode tests live in `tests/direct/`:
 
 - `test_voting.py` — end-to-end contract behavior: deployment validation, voting, double-vote
-  prevention, ownership, the voting-period and voting-ended guards, and result access
+  prevention, ownership, the voting-period and voting-ended guards, deadline enforcement inside
+  `vote_with_reasoning` (including exact-boundary semantics), automatic end at the deadline,
+  hidden-until-ended result views, and result access
 - `test_legitimacy_invariant.py` — pins the score/flag invariant using mocked LLM replies,
   including adversarial pairs such as `{"score": 85, "legitimate": false}`, threshold
   boundaries, clamping, and validator rejection of inconsistent leader results

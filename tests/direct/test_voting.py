@@ -104,7 +104,7 @@ def test_legitimacy_scoring_populates_vote_record(direct_vm, direct_deploy, dire
     assert record["is_legitimate"] == (record["legitimacy_score"] >= 70)
 
 
-def test_only_legitimate_votes_are_counted(direct_vm, direct_deploy, direct_alice, direct_bob):
+def test_only_legitimate_votes_are_counted(direct_vm, direct_deploy, direct_alice, direct_bob, monkeypatch):
     """Core consensus invariant: a vote is only added to the tally when the
     leader/validator consensus judged it legitimate (score >= 70)."""
     question = "Best programming language?"
@@ -122,7 +122,6 @@ def test_only_legitimate_votes_are_counted(direct_vm, direct_deploy, direct_alic
 
     record = contract.get_vote_record(_to_address(direct_alice))
     assert record["is_legitimate"] is True
-    assert contract.get_current_tallies()["opt_0"]["votes"] == 1
 
     # Phase 2: a below-threshold vote is recorded but NOT counted.
     direct_vm.clear_mocks()
@@ -136,13 +135,21 @@ def test_only_legitimate_votes_are_counted(direct_vm, direct_deploy, direct_alic
 
     record = contract.get_vote_record(_to_address(direct_bob))
     assert record["is_legitimate"] is False
+
+    # Tallies are hidden while voting is open (no results until it ends)
+    with direct_vm.expect_revert("[EXPECTED] Voting not ended"):
+        contract.get_current_tallies()
+
+    # Once the deadline passes, only Alice's legitimate vote is counted
+    end_timestamp = int(contract.get_voting_status()["end_timestamp"])
+    monkeypatch.setattr(time, "time", lambda: end_timestamp + 100)
     tallies = contract.get_current_tallies()
     assert tallies["opt_0"]["votes"] == 1  # only Alice's legitimate vote
     assert tallies["opt_1"]["votes"] == 0
     assert tallies["_total"] == tallies["opt_0"]["votes"]
 
 
-def test_vote_with_suspicious_reasoning_may_be_rejected(direct_vm, direct_deploy, direct_alice):
+def test_vote_with_suspicious_reasoning_may_be_rejected(direct_vm, direct_deploy, direct_alice, monkeypatch):
     """Test that suspicious (coercion-flavored) reasoning gets a low score:
     the vote is recorded but never tallied."""
     question = "Best programming language?"
@@ -166,6 +173,11 @@ def test_vote_with_suspicious_reasoning_may_be_rejected(direct_vm, direct_deploy
     assert "is_legitimate" in record
     assert record["legitimacy_score"] < 70
     assert record["is_legitimate"] is False
+
+    # The low-scoring vote is recorded but never tallied (checked after the
+    # deadline, since tallies are hidden while voting is open)
+    end_timestamp = int(contract.get_voting_status()["end_timestamp"])
+    monkeypatch.setattr(time, "time", lambda: end_timestamp + 100)
     assert contract.get_current_tallies()["opt_0"]["votes"] == 0
 
 
@@ -232,6 +244,73 @@ def test_vote_after_end_fails(direct_vm, direct_deploy, direct_alice, monkeypatc
     # Results become readable once voting has ended
     results = contract.get_results()
     assert results["_total"] == 0
+
+
+def test_vote_after_deadline_fails_even_before_end_voting(direct_vm, direct_deploy, direct_alice, monkeypatch):
+    """The configured deadline is enforced inside vote_with_reasoning itself.
+
+    Regression for the reviewer flag: votes were accepted after
+    end_timestamp until the owner manually ended the poll. Now a vote past
+    the deadline reverts even though end_voting() was never called, and the
+    poll is automatically considered ended once the deadline passes.
+    """
+    question = "Test question"
+    options = ["Yes", "No"]
+    # Alice deploys the contract, so she is the owner (owner = deploy-time sender)
+    direct_vm.sender = direct_alice
+    contract = direct_deploy("voting.py", question, options, duration_seconds=1)
+
+    # Once the deadline passes, voting is over even though the owner never
+    # called end_voting()...
+    end_timestamp = int(contract.get_voting_status()["end_timestamp"])
+    monkeypatch.setattr(time, "time", lambda: end_timestamp + 100)
+    assert contract.get_voting_status()["ended"] is True
+
+    # ...and the deadline check in vote_with_reasoning rejects the vote
+    with direct_vm.expect_revert("[EXPECTED] Voting period has ended"):
+        contract.vote_with_reasoning("opt_0", "Too late to vote")
+
+    # A vote before the deadline still works (sanity check on the boundary)
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(
+        "Analyze this vote",
+        '{"score": 90, "legitimate": true, "notes": "coherent genuine preference"}',
+    )
+    monkeypatch.setattr(time, "time", lambda: end_timestamp - 10)
+    contract.vote_with_reasoning("opt_0", "Just in time")
+
+    # Tallies are readable again once the deadline has passed
+    monkeypatch.setattr(time, "time", lambda: end_timestamp + 100)
+    assert contract.get_current_tallies()["opt_0"]["votes"] == 1
+
+
+def test_vote_at_deadline_boundary(direct_vm, direct_deploy, direct_alice, monkeypatch):
+    """Pin the >= deadline semantics: a vote at exactly end_timestamp is
+    rejected; one second before it is accepted."""
+    question = "Test question"
+    options = ["Yes", "No"]
+    # Alice deploys the contract, so she is the owner (owner = deploy-time sender)
+    direct_vm.sender = direct_alice
+    contract = direct_deploy("voting.py", question, options, duration_seconds=1)
+    end_timestamp = int(contract.get_voting_status()["end_timestamp"])
+
+    # Exactly at the deadline -> rejected (now >= end_timestamp)
+    monkeypatch.setattr(time, "time", lambda: float(end_timestamp))
+    with direct_vm.expect_revert("[EXPECTED] Voting period has ended"):
+        contract.vote_with_reasoning("opt_0", "Exactly at the deadline")
+
+    # One second before the deadline -> accepted
+    direct_vm.mock_llm(
+        "Analyze this vote",
+        '{"score": 90, "legitimate": true, "notes": "coherent genuine preference"}',
+    )
+    monkeypatch.setattr(time, "time", lambda: float(end_timestamp) - 1.0)
+    contract.vote_with_reasoning("opt_0", "One second early")
+
+    # Past the deadline, results become readable without end_voting()
+    monkeypatch.setattr(time, "time", lambda: float(end_timestamp) + 1.0)
+    assert contract.get_current_tallies()["opt_0"]["votes"] == 1
+    assert contract.get_results()["_total"] == 1
 
 
 def test_empty_question_rejected(direct_vm, direct_deploy):

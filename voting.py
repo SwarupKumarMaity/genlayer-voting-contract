@@ -84,10 +84,24 @@ class VotingContract(gl.Contract):
                 votes=0
             )
 
+    def _voting_is_over(self) -> bool:
+        """Voting is over once the owner ends it OR the deadline has passed.
+
+        The deadline is authoritative: even if the owner never calls
+        end_voting(), the poll is over as soon as end_timestamp passes.
+        """
+        return self.voting_ended or u256(int(time.time())) >= self.end_timestamp
+
     @gl.public.write
     def vote_with_reasoning(self, option_id: str, reasoning: str):
         if self.voting_ended:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Voting has ended")
+
+        # Enforce the configured deadline: no votes are accepted once
+        # end_timestamp has passed, even if the owner has not called
+        # end_voting() yet.
+        if u256(int(time.time())) >= self.end_timestamp:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Voting period has ended")
 
         if option_id not in self.options:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Invalid option")
@@ -220,7 +234,7 @@ Only the score matters; the contract decides legitimacy from it (score >= {LEGIT
 
     @gl.public.view
     def get_results(self) -> dict:
-        if not self.voting_ended:
+        if not self._voting_is_over():
             raise gl.vm.UserError(f"{ERR_EXPECTED} Voting not ended")
 
         results = {}
@@ -236,6 +250,11 @@ Only the score matters; the contract decides legitimacy from it (score >= {LEGIT
 
     @gl.public.view
     def get_current_tallies(self) -> dict:
+        # Hidden while voting is open: no results until voting has ended
+        # (deadline passed or the owner called end_voting).
+        if not self._voting_is_over():
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Voting not ended")
+
         results = {}
         total = u256(0)
         for opt_id, opt in self.options.items():
@@ -299,7 +318,7 @@ Only the score matters; the contract decides legitimacy from it (score >= {LEGIT
     def get_voting_status(self) -> dict:
         now = u256(int(time.time()))
         return {
-            "ended": self.voting_ended,
+            "ended": self._voting_is_over(),
             "current_timestamp": now,
             "end_timestamp": self.end_timestamp,
             "time_remaining": max(0, int(self.end_timestamp) - int(now)),

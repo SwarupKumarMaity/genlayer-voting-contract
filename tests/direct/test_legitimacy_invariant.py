@@ -10,6 +10,8 @@ These tests mock the LLM with exactly those adversarial replies, so they
 fail against the old logic and pass against the derived-flag logic.
 """
 
+import time
+
 import pytest
 from gltest.direct import *
 
@@ -17,12 +19,17 @@ PROMPT_PATTERN = "Analyze this vote"
 THRESHOLD = 70
 
 
-def _deploy_and_vote(direct_vm, direct_deploy, direct_alice, llm_response):
-    """Deploy, register one LLM reply, and cast a single vote as Alice."""
+def _deploy_and_vote(direct_vm, direct_deploy, direct_alice, llm_response, monkeypatch):
+    """Deploy, register one LLM reply, cast a single vote as Alice, then move
+    the clock past the deadline so tallies/results are readable."""
     contract = direct_deploy("voting.py", "Best programming language?", ["Python", "JavaScript"])
     direct_vm.mock_llm(PROMPT_PATTERN, llm_response)
     direct_vm.sender = direct_alice
     contract.vote_with_reasoning("opt_0", "I prefer Python for its readability")
+
+    # Voting period elapsed -> get_current_tallies()/get_results() work
+    end_timestamp = int(contract.get_voting_status()["end_timestamp"])
+    monkeypatch.setattr(time, "time", lambda: end_timestamp + 100)
     return contract
 
 
@@ -40,12 +47,13 @@ def _sole_record(contract):
 
 
 def test_high_score_counts_even_when_model_says_illegitimate(
-    direct_vm, direct_deploy, direct_alice
+    direct_vm, direct_deploy, direct_alice, monkeypatch
 ):
     """score 85 + legitimate:false -> the score wins, the vote counts."""
     contract = _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": 85, "legitimate": false, "notes": "coherent genuine preference"}',
+        monkeypatch,
     )
 
     record = _sole_record(contract)
@@ -55,12 +63,13 @@ def test_high_score_counts_even_when_model_says_illegitimate(
 
 
 def test_low_score_rejected_even_when_model_says_legitimate(
-    direct_vm, direct_deploy, direct_alice
+    direct_vm, direct_deploy, direct_alice, monkeypatch
 ):
     """score 20 + legitimate:true -> the score wins, the vote is not counted."""
     contract = _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": 20, "legitimate": true, "notes": "signs of coercion"}',
+        monkeypatch,
     )
 
     record = _sole_record(contract)
@@ -79,11 +88,12 @@ def test_low_score_rejected_even_when_model_says_legitimate(
     ],
 )
 def test_threshold_and_clamping(
-    direct_vm, direct_deploy, direct_alice, raw_score, expected_score, expected_legit
+    direct_vm, direct_deploy, direct_alice, raw_score, expected_score, expected_legit, monkeypatch
 ):
     contract = _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": %s, "legitimate": true, "notes": "assessment"}' % raw_score,
+        monkeypatch,
     )
 
     record = _sole_record(contract)
@@ -93,12 +103,13 @@ def test_threshold_and_clamping(
 
 
 def test_unparseable_score_falls_back_to_50_and_is_rejected(
-    direct_vm, direct_deploy, direct_alice
+    direct_vm, direct_deploy, direct_alice, monkeypatch
 ):
     """A garbage score must not become a legitimate vote."""
     contract = _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": "not-a-number", "legitimate": true, "notes": "assessment"}',
+        monkeypatch,
     )
 
     record = _sole_record(contract)
@@ -110,11 +121,14 @@ def test_unparseable_score_falls_back_to_50_and_is_rejected(
 NOTES = "coherent genuine preference"
 
 
-def test_validator_accepts_consistent_leader(direct_vm, direct_deploy, direct_alice):
+def test_validator_accepts_consistent_leader(
+    direct_vm, direct_deploy, direct_alice, monkeypatch
+):
     """Sanity check: a leader whose flag matches its score passes consensus."""
     _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": 85, "legitimate": true, "notes": "%s"}' % NOTES,
+        monkeypatch,
     )
 
     assert direct_vm.run_validator(
@@ -123,7 +137,7 @@ def test_validator_accepts_consistent_leader(direct_vm, direct_deploy, direct_al
 
 
 def test_validator_rejects_leader_whose_flag_contradicts_its_score(
-    direct_vm, direct_deploy, direct_alice
+    direct_vm, direct_deploy, direct_alice, monkeypatch
 ):
     """The case agreement alone cannot catch.
 
@@ -135,6 +149,7 @@ def test_validator_rejects_leader_whose_flag_contradicts_its_score(
     _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": 85, "legitimate": false, "notes": "%s"}' % NOTES,
+        monkeypatch,
     )
 
     assert direct_vm.run_validator(
@@ -143,12 +158,13 @@ def test_validator_rejects_leader_whose_flag_contradicts_its_score(
 
 
 def test_validator_rejects_low_score_claimed_legitimate(
-    direct_vm, direct_deploy, direct_alice
+    direct_vm, direct_deploy, direct_alice, monkeypatch
 ):
     """Mirror case: 20 / true, again agreed on by leader and validator."""
     _deploy_and_vote(
         direct_vm, direct_deploy, direct_alice,
         '{"score": 20, "legitimate": true, "notes": "%s"}' % NOTES,
+        monkeypatch,
     )
 
     assert direct_vm.run_validator(
