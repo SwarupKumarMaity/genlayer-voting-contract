@@ -7,8 +7,9 @@ A GenLayer intelligent contract for conducting polls and votes with legitimacy v
 |                        |                                                                      |
 | ---------------------- | -------------------------------------------------------------------- |
 | Network                | Studionet                                                            |
-| Deployment transaction | `0xa7b133716a2ac2c87b3de156a7da31187f8b6217ccf345c41813e63d3788d38e` |
-| Contract address       | 0xe3884d8a7ccf50d36f27a26812c61333B3cE3698                           |
+| Contract address       | `0xf3B1934cC8BBBD10dD7c6b12322cFD53906f9916`                         |
+| Deployment transaction | `0x901a1619112c1aa711acaeb04b31e4a1748233b2584e680d6eb0e02357f215ec` |
+| Status                 | FINALIZED, consensus Accepted                                        |
 
 ## Features
 
